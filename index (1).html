@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>School Bus Tracker</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root{--bg:#f4f6fa;--card:#fff;--ink:#1c2430;--mut:#667085;--pri:#1a73e8;--ok:#188038;--bad:#d93025;--line:#e3e8ef}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.4 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 14px;background:var(--pri);color:#fff;position:sticky;top:0;z-index:5}
+  header b{font-size:16px}
+  #status{font-size:13px;background:rgba(255,255,255,.18);padding:3px 10px;border-radius:999px;white-space:nowrap}
+  main{max-width:900px;margin:0 auto;padding:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  h2{margin:0 0 10px;font-size:16px}
+  input,select,button{font:inherit;padding:10px 12px;border-radius:8px;border:1px solid var(--line);width:100%;margin:4px 0}
+  button{background:var(--pri);color:#fff;border:0;cursor:pointer;font-weight:600}
+  button.sec{background:#eef2f9;color:var(--ink)}
+  button.bad{background:var(--bad)}
+  button.ok{background:var(--ok)}
+  button.sm{width:auto;padding:5px 10px;font-size:13px;margin:0}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .row>*{flex:1;min-width:120px}
+  .err{color:var(--bad);min-height:20px;font-size:14px}
+  .mut{color:var(--mut);font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
+  #mapbox{height:45vh;min-height:280px;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#dde3ec;margin-bottom:12px;position:relative}
+  #mapbox iframe{width:100%;height:100%;border:0}
+  #gmap{width:100%;height:100%}
+  .hidden{display:none!important}
+  .banner{background:#fff4ce;border:1px solid #f0d878;padding:10px;border-radius:8px;margin-bottom:12px;font-weight:600}
+  .big{font-size:22px;font-weight:700}
+</style>
+</head>
+<body>
+<header><b>🚌 School Bus Tracker</b><span id="status">⚪ offline</span></header>
+<main>
+
+<!-- LOGIN -->
+<div id="loginView" class="card">
+  <h2>Login</h2>
+  <input id="code" placeholder="School code (e.g. myschool)" autocapitalize="none" autocomplete="off">
+  <input id="user" placeholder="Username" autocapitalize="none" autocomplete="username">
+  <input id="pass" type="password" placeholder="Password" autocomplete="current-password">
+  <button id="btnLogin">Login</button>
+  <button id="btnAdmin" class="sec">Admin login (admin / admin123)</button>
+  <div id="loginErr" class="err"></div>
+  <p class="mut">Admin opens first and keeps the page open. Drivers and parents use the same school code.</p>
+</div>
+
+<!-- APP -->
+<div id="appView" class="hidden">
+  <div id="alertBanner" class="banner hidden"></div>
+  <div id="mapTools" class="row" style="margin-bottom:8px">
+    <select id="focusRoute" class="hidden"></select>
+    <button id="btnFollow" class="sec sm">📍 Following: on</button>
+  </div>
+  <div id="mapbox"><div id="gmap"></div></div>
+  <div id="panel"></div>
+  <button id="btnLogout" class="sec">Log out</button>
+</div>
+
+</main>
+<script>
+"use strict";
+/* ============================ helpers ============================ */
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Math.random().toString(36).slice(2, 9);
+const NEAR_M = 500, FAR_M = 800;
+
+function distM(a, b){
+  const R = 6371000, r = x => x * Math.PI / 180;
+  const dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
+  const h = Math.sin(dLat/2)**2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+const fmtDist = m => m < 1000 ? Math.round(m) + ' m' : (m/1000).toFixed(1) + ' km';
+const ago = ts => { const s = Math.round((Date.now() - ts)/1000); return s < 60 ? s + 's ago' : Math.round(s/60) + ' min ago'; };
+function setStatus(t){ $('status').textContent = t; }
+
+/* ============================ sound / alerts ============================ */
+let audioCtx = null;
+function unlockAudio(){
+  try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch(e){}
+  if ('Notification' in window && Notification.permission === 'default') { try { Notification.requestPermission(); } catch(e){} }
+}
+function beep(){
+  if (!audioCtx) return;
+  [0, .35, .7].forEach(t => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = 880; o.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(.3, audioCtx.currentTime + t);
+    g.gain.exponentialRampToValueAtTime(.001, audioCtx.currentTime + t + .25);
+    o.start(audioCtx.currentTime + t); o.stop(audioCtx.currentTime + t + .3);
+  });
+}
+function notify(msg){
+  const b = $('alertBanner'); b.textContent = '🔔 ' + msg; b.classList.remove('hidden');
+  beep(); try { navigator.vibrate && navigator.vibrate([300,150,300]); } catch(e){}
+  try { if ('Notification' in window && Notification.permission === 'granted') new Notification('School Bus', {body: msg}); } catch(e){}
+}
+
+/* ============================ Google Maps view ============================ */
+const GM = { key:'', mapId:'DEMO_MAP_ID', loading:false, ready:false, failed:false, map:null, markers:{}, anims:{}, follow:true, items:[], fbSrcAt:0, fbLast:null };
+
+/* Vector maps (WebGL) need a Map ID. DEMO_MAP_ID works for testing; for production create a
+   vector Map ID in Google Cloud Console > Map Management and paste it in the admin page. */
+function mapSetKey(key, mapId){
+  key = (key || '').trim();
+  if (mapId) GM.mapId = mapId.trim();
+  if (key === GM.key) return;
+  GM.key = key;
+  if (key && !GM.loading && !GM.ready){
+    GM.loading = true;
+    window.gm_authFailure = () => { GM.failed = true; mapRender(); };
+    window.__gmReady = () => { GM.ready = true; mapRender(); };
+    const s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) + '&v=weekly&callback=__gmReady';
+    s.onerror = () => { GM.failed = true; mapRender(); };
+    document.head.appendChild(s);
+  }
+}
+
+/* items: [{id, lat, lng, label, kind:'bus'|'stop'|'me'}] */
+function mapUpdate(items){ GM.items = items; mapRender(); }
+
+function mapRender(){
+  const items = GM.items;
+  const useJs = GM.key && GM.ready && !GM.failed && window.google && google.maps;
+  $('gmap').classList.toggle('hidden', !useJs);
+  const old = $('mapbox').querySelector('iframe');
+  if (useJs){
+    if (old) old.remove();
+    if (!GM.map){
+      GM.map = new google.maps.Map($('gmap'), {
+        center:{lat:20.59, lng:78.96}, zoom:5, streetViewControl:false, mapTypeControl:false,
+        mapId:GM.mapId || 'DEMO_MAP_ID',
+        renderingType:google.maps.RenderingType ? google.maps.RenderingType.VECTOR : 'VECTOR' /* falls back to raster if WebGL is missing */
+      });
+      GM.map.addListener('dragstart', () => { GM.follow = false; $('btnFollow').textContent = '📍 Following: off'; });
+      GM.map.addListener('renderingtype_changed', () => { GM.vector = GM.map.getRenderingType() === 'VECTOR'; });
+    }
+    const seen = new Set();
+    items.forEach(it => {
+      seen.add(it.id);
+      const pos = {lat:it.lat, lng:it.lng};
+      let m = GM.markers[it.id];
+      const icon = it.kind === 'bus' ? '🚌' : it.kind === 'stop' ? '🏠' : '🧍';
+      if (!m){ m = GM.markers[it.id] = new google.maps.Marker({ map:GM.map, position:pos, title:it.label, label:{text:icon, fontSize:'22px'} }); }
+      else { m.setTitle(it.label); glideMarker(it.id, m, pos); }
+    });
+    Object.keys(GM.markers).forEach(k => { if (!seen.has(k)){ GM.markers[k].setMap(null); delete GM.markers[k]; } });
+    if (items.length && GM.follow){
+      if (items.length === 1){
+        const c = {lat:items[0].lat, lng:items[0].lng};
+        if (GM.map.getZoom() < 15){ GM.map.setCenter(c); GM.map.setZoom(16); }
+        else GM.map.panTo(c);               /* smooth glide on vector maps */
+      } else {
+        const b = new google.maps.LatLngBounds();
+        items.forEach(it => b.extend({lat:it.lat, lng:it.lng}));
+        GM.map.fitBounds(b, 60);
+      }
+    }
+  } else {
+    /* keyless fallback: Google Maps embed, centred on the first bus */
+    const t = items.find(i => i.kind === 'bus') || items[0];
+    if (!t){ if (old) old.remove(); return; }
+    const moved = !GM.fbLast || distM(GM.fbLast, t) > 15;
+    if (old && (!moved || Date.now() - GM.fbSrcAt < 6000)) return;
+    GM.fbLast = {lat:t.lat, lng:t.lng}; GM.fbSrcAt = Date.now();
+    const f = old || document.createElement('iframe');
+    f.src = 'https://maps.google.com/maps?q=' + t.lat + ',' + t.lng + '&z=16&output=embed';
+    if (!old) $('mapbox').appendChild(f);
+  }
+}
+/* move a marker smoothly from its old spot to the new GPS fix (≈1.5 s) */
+function glideMarker(id, m, to){
+  const from = m.getPosition(); if (!from) { m.setPosition(to); return; }
+  const a = {lat:from.lat(), lng:from.lng()};
+  if (distM(a, to) < 1 || distM(a, to) > 2000){ m.setPosition(to); return; }
+  const t0 = performance.now(), dur = 1500;
+  cancelAnimationFrame(GM.anims[id]);
+  const step = now => {
+    const k = Math.min(1, (now - t0) / dur);
+    m.setPosition({lat:a.lat + (to.lat - a.lat) * k, lng:a.lng + (to.lng - a.lng) * k});
+    if (k < 1) GM.anims[id] = requestAnimationFrame(step);
+  };
+  GM.anims[id] = requestAnimationFrame(step);
+}
+$('btnFollow').onclick = () => {
+  GM.follow = !GM.follow;
+  $('btnFollow').textContent = '📍 Following: ' + (GM.follow ? 'on' : 'off');
+  if (GM.follow) mapRender();
+};
+
+/* ============================ shared state ============================ */
+let role = null, schoolCode = '', me = null;
+let peer = null, conn = null, retryTimer = null, loggedIn = false, creds = null;
+let db = null;              // host only
+let last = {};              // routeId -> {lat,lng,speed,ts,driver}
+let sessions = new Map();   // host only: conn -> {role,user,name,routeId}
+let myRoute = null;         // client: {id,name}
+let myStop = null;          // parent stop
+let alerted = false;
+
+const peerIdFor = code => 'bustrack-' + code.toLowerCase().replace(/[^a-z0-9]/g, '');
+const dbKey = () => 'bt_db_' + schoolCode.toLowerCase();
+
+/* ============================ HOST (admin) ============================ */
+function loadDb(){
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(dbKey())); } catch(e){}
+  db = d || { adminPass:'admin123', mapsKey:'', mapId:'DEMO_MAP_ID', routes:[{id:uid(), name:'Route 1'}], users:[] };
+  last = {};
+}
+function saveDb(){ try { localStorage.setItem(dbKey(), JSON.stringify(db)); } catch(e){} }
+
+function startHost(){
+  loadDb();
+  mapSetKey(db.mapsKey, db.mapId);
+  const make = () => {
+    peer = new Peer(peerIdFor(schoolCode));
+    peer.on('open', () => { setStatus('🟢 hosting · ' + sessions.size + ' connected'); });
+    peer.on('connection', c => c.on('data', d => hostOnData(c, d)));
+    peer.on('disconnected', () => { setStatus('🟠 reconnecting…'); try { peer.reconnect(); } catch(e){} });
+    peer.on('error', e => {
+      if (e.type === 'unavailable-id'){
+        showLogin('Another admin page is already hosting this school code. Close it first, or use a different code.');
+        try { peer.destroy(); } catch(_){} peer = null;
+      } else { setStatus('🔴 ' + e.type); }
+    });
+  };
+  make();
+  role = 'admin'; showApp(); renderAdmin();
+}
+
+function hostCount(){ setStatus('🟢 hosting · ' + sessions.size + ' connected'); }
+
+function hostOnData(c, d){
+  if (!d || typeof d !== 'object') return;
+  if (d.type === 'login'){
+    const u = db.users.find(x => x.u === d.u && x.p === d.p);
+    if (!u){ c.send({type:'login-fail'}); return; }
+    // drop any older session for the same user
+    sessions.forEach((s, oc) => { if (s.user === u.u && oc !== c){ try { oc.close(); } catch(e){} sessions.delete(oc); } });
+    sessions.set(c, {role:u.role, user:u.u, name:u.name, routeId:u.routeId});
+    c.on('close', () => { sessions.delete(c); hostCount(); if (role === 'admin') renderAdmin(); });
+    const route = db.routes.find(r => r.id === u.routeId) || null;
+    c.send({type:'login-ok', role:u.role, name:u.name, route, stop:u.stop || null, mapsKey:db.mapsKey, mapId:db.mapId, last:last[u.routeId] || null});
+    hostCount(); renderAdmin();
+    return;
+  }
+  const s = sessions.get(c);
+  if (!s) return;
+  if (d.type === 'loc' && s.role === 'driver'){
+    const p = {lat:+d.lat, lng:+d.lng, speed:+d.speed || 0, ts:Date.now(), driver:s.name};
+    if (!isFinite(p.lat) || !isFinite(p.lng)) return;
+    last[s.routeId] = p;
+    sessions.forEach((o, oc) => { if (o.role === 'parent' && o.routeId === s.routeId){ try { oc.send({type:'loc', p}); } catch(e){} } });
+    renderAdminLive(); updateAdminMap();
+  }
+  if (d.type === 'setstop' && s.role === 'parent'){
+    const u = db.users.find(x => x.u === s.user);
+    if (u && isFinite(+d.lat) && isFinite(+d.lng)){ u.stop = {lat:+d.lat, lng:+d.lng}; saveDb(); c.send({type:'stop', stop:u.stop}); }
+  }
+}
+
+/* ---- admin UI ---- */
+let adminFocus = null;
+function renderAdmin(){
+  if (role !== 'admin') return;
+  const routes = db.routes, users = db.users;
+  const online = u => [...sessions.values()].some(s => s.user === u.u);
+  const rname = id => (routes.find(r => r.id === id) || {name:'—'}).name;
+  $('panel').innerHTML = `
+    <div class="card"><h2>Live buses</h2><div id="live"></div></div>
+    <div class="card"><h2>Google Maps key (optional)</h2>
+      <input id="mk" placeholder="Maps JavaScript API key" value="${esc(db.mapsKey)}">
+      <input id="mid" placeholder="Vector Map ID (default DEMO_MAP_ID)" value="${esc(db.mapId || 'DEMO_MAP_ID')}">
+      <button id="mkSave" class="sec">Save</button>
+      <p class="mut">With a key the map uses Google's vector (WebGL) rendering, so the camera glides smoothly as the bus moves. It falls back to the standard map if the device has no WebGL. For your own style, create a vector Map ID in Google Cloud Console. Without a key the basic Google Maps embed is used, which refreshes more slowly. The key and Map ID are shared to drivers and parents automatically.</p></div>
+    <div class="card"><h2>Routes</h2>
+      <table>${routes.map(r => `<tr><td>${esc(r.name)}</td><td style="text-align:right"><button class="sm bad" data-delroute="${r.id}">Delete</button></td></tr>`).join('')}</table>
+      <div class="row"><input id="rn" placeholder="New route name"><button id="rAdd">Add route</button></div></div>
+    <div class="card"><h2>Drivers and parents</h2>
+      <table><tr><th>Name</th><th>Role</th><th>Route</th><th></th></tr>
+      ${users.map(u => `<tr><td>${online(u) ? '🟢' : '⚪'} ${esc(u.name)}<br><span class="mut">${esc(u.u)}</span></td><td>${u.role}</td><td>${esc(rname(u.routeId))}</td><td><button class="sm bad" data-deluser="${esc(u.u)}">✕</button></td></tr>`).join('') || '<tr><td colspan="4" class="mut">None yet</td></tr>'}</table>
+      <div class="row"><select id="nr"><option value="driver">Driver</option><option value="parent">Parent</option></select>
+      <select id="nroute">${routes.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select></div>
+      <div class="row"><input id="nn" placeholder="Display name (e.g. Ravi's mom)"><input id="nu" placeholder="Username" autocapitalize="none"><input id="np" placeholder="Password"></div>
+      <button id="uAdd">Add user</button><div id="uErr" class="err"></div></div>`;
+  $('mkSave').onclick = () => { db.mapsKey = $('mk').value.trim(); db.mapId = $('mid').value.trim() || 'DEMO_MAP_ID'; saveDb(); mapSetKey(db.mapsKey, db.mapId); alert('Saved. New logins get the key and Map ID. Reload this page to apply changes here.'); };
+  $('rAdd').onclick = () => { const n = $('rn').value.trim(); if (!n) return; db.routes.push({id:uid(), name:n}); saveDb(); renderAdmin(); };
+  $('uAdd').onclick = () => {
+    const u = $('nu').value.trim(), p = $('np').value, n = $('nn').value.trim() || u;
+    if (!u || !p){ $('uErr').textContent = 'Username and password required'; return; }
+    if (u === 'admin' || db.users.some(x => x.u === u)){ $('uErr').textContent = 'Username already taken'; return; }
+    if (!$('nroute').value){ $('uErr').textContent = 'Add a route first'; return; }
+    db.users.push({u, p, name:n, role:$('nr').value, routeId:$('nroute').value}); saveDb(); renderAdmin();
+  };
+  document.querySelectorAll('[data-delroute]').forEach(b => b.onclick = () => {
+    const id = b.dataset.delroute;
+    if (db.users.some(u => u.routeId === id)){ alert('Remove the users on this route first.'); return; }
+    db.routes = db.routes.filter(r => r.id !== id); saveDb(); renderAdmin();
+  });
+  document.querySelectorAll('[data-deluser]').forEach(b => b.onclick = () => {
+    const name = b.dataset.deluser;
+    db.users = db.users.filter(u => u.u !== name);
+    sessions.forEach((s, c) => { if (s.user === name){ try { c.close(); } catch(e){} sessions.delete(c); } });
+    saveDb(); renderAdmin(); hostCount();
+  });
+  const fr = $('focusRoute'); fr.classList.remove('hidden');
+  fr.innerHTML = '<option value="">All buses</option>' + routes.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
+  fr.value = adminFocus || ''; fr.onchange = () => { adminFocus = fr.value || null; GM.follow = true; GM.fbLast = null; updateAdminMap(); };
+  renderAdminLive(); updateAdminMap();
+}
+function renderAdminLive(){
+  const el = $('live'); if (!el || !db) return;
+  const rows = db.routes.map(r => {
+    const p = last[r.id];
+    return `<tr><td>${esc(r.name)}</td><td>${p ? `${esc(p.driver)}<br><span class="mut">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)} · ${Math.round(p.speed*3.6)} km/h · ${ago(p.ts)}</span>` : '<span class="mut">no signal</span>'}</td></tr>`;
+  }).join('');
+  el.innerHTML = `<table>${rows}</table>`;
+}
+function updateAdminMap(){
+  if (role !== 'admin' || !db) return;
+  const items = [];
+  db.routes.forEach(r => { const p = last[r.id]; if (p && (!adminFocus || adminFocus === r.id)) items.push({id:'bus-' + r.id, lat:p.lat, lng:p.lng, label:r.name + ' – ' + p.driver, kind:'bus'}); });
+  mapUpdate(items);
+}
+setInterval(() => { if (role === 'admin') renderAdminLive(); }, 5000);
+
+/* ============================ CLIENT (driver / parent) ============================ */
+function startClient(u, p){
+  creds = {u, p}; loggedIn = false; role = null;
+  setStatus('🟡 connecting…');
+  clientPeer();
+}
+function clientPeer(){
+  try { peer && peer.destroy(); } catch(e){}
+  peer = new Peer();
+  peer.on('open', openConn);
+  peer.on('disconnected', () => { try { peer.reconnect(); } catch(e){} });
+  peer.on('error', e => {
+    if (e.type === 'peer-unavailable') setStatus('🟠 admin offline, retrying…');
+    else setStatus('🔴 ' + e.type);
+    scheduleRetry();
+  });
+}
+function openConn(){
+  if (!peer || peer.destroyed) return;
+  if (peer.disconnected){ try { peer.reconnect(); } catch(e){} }
+  try { conn && conn.close(); } catch(e){}
+  conn = peer.connect(peerIdFor(schoolCode), {reliable:true});
+  conn.on('open', () => { conn.send({type:'login', u:creds.u, p:creds.p}); });
+  conn.on('data', clientOnData);
+  conn.on('close', () => { if (creds){ setStatus('🟠 disconnected, retrying…'); scheduleRetry(); } });
+  conn.on('error', () => scheduleRetry());
+}
+function scheduleRetry(){
+  if (!creds || retryTimer) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (!creds) return;
+    if (!peer || peer.destroyed) clientPeer(); else openConn();
+  }, 3000);
+}
+function clientOnData(d){
+  if (d.type === 'login-fail'){
+    creds = null; try { peer.destroy(); } catch(e){} showLogin('Wrong username or password, or this user does not exist.'); return;
+  }
+  if (d.type === 'login-ok'){
+    const first = !loggedIn;
+    loggedIn = true; role = d.role; me = d.name; myRoute = d.route; myStop = d.stop; mapSetKey(d.mapsKey, d.mapId);
+    setStatus('🟢 connected');
+    if (first){ showApp(); }
+    if (role === 'driver') renderDriver(); else renderParent();
+    if (d.last){ last[myRoute.id] = d.last; parentUpdate(); }
+    if (role === 'driver' && tripOn) sendFix();
+  }
+  if (d.type === 'loc'){ last[myRoute.id] = d.p; parentUpdate(); }
+  if (d.type === 'stop'){ myStop = d.stop; parentUpdate(); renderParent(); }
+}
+const send = m => { try { conn && conn.open && conn.send(m); } catch(e){} };
+
+/* ---- driver ---- */
+let tripOn = false, watchId = null, wakeLock = null, lastFix = null, lastSent = 0;
+function renderDriver(){
+  $('focusRoute').classList.add('hidden');
+  $('panel').innerHTML = `<div class="card"><h2>Driver: ${esc(me)}</h2>
+    <p class="mut">Route: ${esc(myRoute ? myRoute.name : '—')}</p>
+    <button id="trip" class="${tripOn ? 'bad' : 'ok'}">${tripOn ? '⏹ End trip' : '▶ Start trip'}</button>
+    <p id="fix" class="big">${lastFix ? lastFix.lat.toFixed(5) + ', ' + lastFix.lng.toFixed(5) : 'Waiting for GPS…'}</p>
+    <p class="mut">Keep this page open during the trip. The screen stays on while the trip is running.</p></div>`;
+  $('trip').onclick = () => tripOn ? stopTrip() : startTrip();
+}
+async function startTrip(){
+  unlockAudio();
+  if (!navigator.geolocation){ alert('GPS is not available on this device.'); return; }
+  tripOn = true; renderDriver();
+  watchId = navigator.geolocation.watchPosition(pos => {
+    lastFix = {lat:pos.coords.latitude, lng:pos.coords.longitude, speed:pos.coords.speed || 0};
+    const f = $('fix'); if (f) f.textContent = lastFix.lat.toFixed(5) + ', ' + lastFix.lng.toFixed(5);
+    mapUpdate([{id:'me', lat:lastFix.lat, lng:lastFix.lng, label:'You', kind:'bus'}]);
+    if (Date.now() - lastSent > 3000) sendFix();
+  }, err => { const f = $('fix'); if (f) f.textContent = 'GPS error: ' + err.message; },
+  {enableHighAccuracy:true, maximumAge:1000, timeout:15000});
+  grabWake();
+}
+function sendFix(){ if (!lastFix) return; lastSent = Date.now(); send({type:'loc', ...lastFix}); }
+function stopTrip(){
+  tripOn = false;
+  if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null;
+  try { wakeLock && wakeLock.release(); } catch(e){} wakeLock = null;
+  renderDriver();
+}
+async function grabWake(){ try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && tripOn) grabWake(); });
+
+/* ---- parent ---- */
+let myPos = null;
+function renderParent(){
+  $('focusRoute').classList.add('hidden');
+  $('panel').innerHTML = `<div class="card"><h2>Hello, ${esc(me)}</h2>
+    <p class="mut">Route: ${esc(myRoute ? myRoute.name : '—')}</p>
+    <p id="pinfo" class="big">Waiting for the bus…</p>
+    <p id="pdist" class="mut"></p></div>
+    <div class="card"><h2>My stop</h2>
+    <p class="mut">${myStop ? 'Stop saved: ' + myStop.lat.toFixed(5) + ', ' + myStop.lng.toFixed(5) : 'No stop set. You will not get "bus is near" alerts until you set one.'}</p>
+    <button id="setStop" class="sec">📌 Use my current location as my stop</button>
+    <p class="mut">You get an alert when the bus is within ${NEAR_M} m. The sound and alert work only while this page is open.</p></div>`;
+  $('setStop').onclick = () => {
+    unlockAudio();
+    navigator.geolocation.getCurrentPosition(
+      p => send({type:'setstop', lat:p.coords.latitude, lng:p.coords.longitude}),
+      e => alert('Could not get your location: ' + e.message), {enableHighAccuracy:true, timeout:15000});
+  };
+  parentUpdate();
+}
+function parentUpdate(){
+  if (role !== 'parent' || !myRoute) return;
+  const p = last[myRoute.id];
+  const items = [];
+  if (p) items.push({id:'bus', lat:p.lat, lng:p.lng, label:'School bus', kind:'bus'});
+  if (myStop) items.push({id:'stop', lat:myStop.lat, lng:myStop.lng, label:'My stop', kind:'stop'});
+  mapUpdate(items);
+  const info = $('pinfo'), dd = $('pdist'); if (!info) return;
+  if (!p){ info.textContent = 'Bus is not live yet'; dd.textContent = ''; return; }
+  info.textContent = '🚌 Bus is live';
+  let t = 'Updated ' + ago(p.ts) + ' · ' + Math.round(p.speed * 3.6) + ' km/h';
+  if (myStop){
+    const d = distM(p, myStop);
+    t += ' · ' + fmtDist(d) + ' from your stop';
+    if (d <= NEAR_M && !alerted){ alerted = true; notify('The bus is ' + fmtDist(d) + ' from your stop.'); }
+    if (d > FAR_M){ alerted = false; $('alertBanner').classList.add('hidden'); }
+  }
+  dd.textContent = t;
+}
+setInterval(parentUpdate, 5000);
+
+/* ============================ views / login ============================ */
+function showLogin(msg){
+  $('appView').classList.add('hidden'); $('loginView').classList.remove('hidden');
+  $('loginErr').textContent = msg || ''; setStatus('⚪ offline');
+  role = null; loggedIn = false;
+}
+function showApp(){ $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden'); }
+
+function doLogin(asAdmin){
+  unlockAudio();
+  schoolCode = $('code').value.trim();
+  if (!schoolCode){ $('loginErr').textContent = 'Enter the school code'; return; }
+  try { localStorage.setItem('bt_code', schoolCode); } catch(e){}
+  $('loginErr').textContent = '';
+  if (asAdmin){
+    // admin password is checked against the saved database, default admin123
+    let saved = null; try { saved = JSON.parse(localStorage.getItem(dbKey())); } catch(e){}
+    const pw = saved ? saved.adminPass : 'admin123';
+    const u = $('user').value.trim(), p = $('pass').value;
+    if (u && p && !(u === 'admin' && p === pw)){ $('loginErr').textContent = 'Wrong admin credentials'; return; }
+    startHost();
+  } else {
+    const u = $('user').value.trim(), p = $('pass').value;
+    if (!u || !p){ $('loginErr').textContent = 'Enter username and password'; return; }
+    startClient(u, p);
+  }
+}
+$('btnLogin').onclick = () => doLogin(false);
+$('btnAdmin').onclick = () => doLogin(true);
+$('pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(false); });
+$('btnLogout').onclick = () => {
+  creds = null; clearTimeout(retryTimer); retryTimer = null;
+  if (tripOn) stopTrip();
+  try { conn && conn.close(); } catch(e){}
+  try { peer && peer.destroy(); } catch(e){}
+  peer = null; conn = null; sessions.clear(); last = {}; alerted = false; GM.fbLast = null; mapUpdate([]);
+  showLogin('');
+};
+try { $('code').value = localStorage.getItem('bt_code') || ''; } catch(e){}
+</script>
+</body>
+</html>
